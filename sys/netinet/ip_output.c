@@ -131,6 +131,7 @@ ip_output(struct mbuf *m, struct mbuf *opt, struct route *ro, int flags,
 	struct in_ifaddr *ia;
 	int isbroadcast;
 	uint16_t ip_len, ip_off;
+	struct route *_ro = ro;
 	struct route iproute;
 	struct rtentry *rte;	/* cache for ro->ro_rt */
 	struct in_addr odst;
@@ -567,12 +568,22 @@ sendit:
 	if ((m->m_flags & M_IP_NEXTHOP) &&
 	    (fwd_tag = m_tag_find(m, PACKET_TAG_IPFORWARD, NULL)) != NULL) {
 		struct m_nexthop *nh = (struct m_nexthop *)(fwd_tag+1);
+		struct ifnet *nh_ifp = NULL;
 		bcopy(&nh->nexthop_dst, dst, sizeof(struct sockaddr_in));
+		if (nh->nexthop_if_index) {
+			nh_ifp = ifnet_byindex(nh->nexthop_if_index);
+		}
 		m->m_flags |= M_SKIP_FIREWALL;
 		m->m_flags &= ~M_IP_NEXTHOP;
 		m_tag_delete(m, fwd_tag);
 		if (have_ia_ref)
 			ifa_free(&ia->ia_ifa);
+		if (nh_ifp != NULL) {
+			ifp = nh_ifp;
+			_ro = NULL;
+			gw = dst;
+			goto passout;
+		}
 		goto again;
 	}
 
@@ -637,7 +648,7 @@ passout:
 		m_clrprotoflags(m);
 		IP_PROBE(send, NULL, NULL, ip, ifp, ip, NULL);
 		error = (*ifp->if_output)(ifp, m,
-		    (const struct sockaddr *)gw, ro);
+		    (const struct sockaddr *)gw, _ro);
 		goto done;
 	}
 
@@ -672,7 +683,7 @@ passout:
 
 			IP_PROBE(send, NULL, NULL, ip, ifp, ip, NULL);
 			error = (*ifp->if_output)(ifp, m,
-			    (const struct sockaddr *)gw, ro);
+			    (const struct sockaddr *)gw, _ro);
 		} else
 			m_freem(m);
 	}

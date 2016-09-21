@@ -94,6 +94,8 @@ ip6_forward(struct mbuf *m, int srcrt)
 {
 	struct ip6_hdr *ip6 = mtod(m, struct ip6_hdr *);
 	struct sockaddr_in6 *dst = NULL;
+	struct rtentry *_rt = NULL;
+	struct ifnet *_ifp = NULL;
 	struct rtentry *rt = NULL;
 	struct route_in6 rin6;
 	int error, type = 0, code = 0;
@@ -543,18 +545,33 @@ again2:
 	if ((m->m_flags & M_IP6_NEXTHOP) &&
 	    (fwd_tag = m_tag_find(m, PACKET_TAG_IPFORWARD, NULL)) != NULL) {
 		struct m_nexthop *nh = (struct m_nexthop *)(fwd_tag+1);
+		struct ifnet *nh_ifp = NULL;
+		if (nh->nexthop_if_index) {
+			nh_ifp = ifnet_byindex(nh->nexthop_if_index);
+		}
 		dst = (struct sockaddr_in6 *)&rin6.ro_dst;
 		bcopy(&nh->nexthop_dst6, dst, sizeof(struct sockaddr_in6));
 		m->m_flags |= M_SKIP_FIREWALL;
 		m->m_flags &= ~M_IP6_NEXTHOP;
 		m_tag_delete(m, fwd_tag);
+		if (nh_ifp != NULL) {
+			_ifp = nh_ifp;
+			_rt = NULL;
+			goto pass;
+		}
 		goto again2;
 	}
 
 pass:
+	/* Use lookup result when M_IP6_NEXTHOP was not set */
+	if (_ifp == NULL) {
+		_ifp = rt->rt_ifp;
+		_rt = rt;
+	}
+
 	/* See if the size was changed by the packet filter. */
-	if (m->m_pkthdr.len > IN6_LINKMTU(rt->rt_ifp)) {
-		in6_ifstat_inc(rt->rt_ifp, ifs6_in_toobig);
+	if (m->m_pkthdr.len > IN6_LINKMTU(_ifp)) {
+		in6_ifstat_inc(_ifp, ifs6_in_toobig);
 		if (mcopy) {
 			u_long mtu;
 #ifdef IPSEC
@@ -563,14 +580,14 @@ pass:
 			size_t ipsechdrsiz;
 #endif /* IPSEC */
 
-			mtu = IN6_LINKMTU(rt->rt_ifp);
+			mtu = IN6_LINKMTU(_ifp);
 #ifdef IPSEC
 			/*
 			 * When we do IPsec tunnel ingress, we need to play
 			 * with the link value (decrement IPsec header size
 			 * from mtu value).  The code is much simpler than v4
 			 * case, as we have the outgoing interface for
-			 * encapsulated packet as "rt->rt_ifp".
+			 * encapsulated packet as "_ifp".
 			 */
 			sp = ipsec_getpolicybyaddr(mcopy, IPSEC_DIR_OUTBOUND,
 				IP_FORWARDING, &ipsecerror);
@@ -593,13 +610,13 @@ pass:
 		goto bad;
 	}
 
-	error = nd6_output(rt->rt_ifp, origifp, m, dst, rt);
+	error = nd6_output(_ifp, origifp, m, dst, _rt);
 	if (error) {
-		in6_ifstat_inc(rt->rt_ifp, ifs6_out_discard);
+		in6_ifstat_inc(_ifp, ifs6_out_discard);
 		IP6STAT_INC(ip6s_cantforward);
 	} else {
 		IP6STAT_INC(ip6s_forward);
-		in6_ifstat_inc(rt->rt_ifp, ifs6_out_forward);
+		in6_ifstat_inc(_ifp, ifs6_out_forward);
 		if (type)
 			IP6STAT_INC(ip6s_redirectsent);
 		else {
@@ -613,7 +630,7 @@ pass:
 	switch (error) {
 	case 0:
 		if (type == ND_REDIRECT) {
-			icmp6_redirect_output(mcopy, rt);
+			icmp6_redirect_output(mcopy, _rt);
 			goto out;
 		}
 		goto freecopy;

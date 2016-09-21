@@ -465,16 +465,24 @@ forwardlocal:
 				RTFREE(ro.ro_rt);
 			return m;
 		}
+		RTFREE(ro.ro_rt);
 		/*
 		 * Redo route lookup with new destination address
 		 */
 		if (fwd_tag) {
 			struct m_nexthop *nh = (struct m_nexthop *)(fwd_tag+1);
+			struct ifnet *nh_ifp = NULL;
 			dest.s_addr = nh->nexthop_dst.sin_addr.s_addr;
+			if (nh->nexthop_if_index) {
+				nh_ifp = ifnet_byindex(nh->nexthop_if_index);
+			}
 			m_tag_delete(m, fwd_tag);
 			m->m_flags &= ~M_IP_NEXTHOP;
+			if (nh_ifp != NULL) {
+				ifp = nh_ifp;
+				goto passout;
+			}
 		}
-		RTFREE(ro.ro_rt);
 		if ((dst = ip_findroute(&ro, dest, m)) == NULL)
 			return NULL;	/* icmp unreach already sent */
 		ifp = ro.ro_rt->rt_ifp;

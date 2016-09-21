@@ -817,11 +817,19 @@ again:
 	if ((m->m_flags & M_IP6_NEXTHOP) &&
 	    (fwd_tag = m_tag_find(m, PACKET_TAG_IPFORWARD, NULL)) != NULL) {
 		struct m_nexthop *nh = (struct m_nexthop *)(fwd_tag+1);
+		struct ifnet *nh_ifp = NULL;
+		if (nh->nexthop_if_index) {
+			nh_ifp = ifnet_byindex(nh->nexthop_if_index);
+		}
 		dst = (struct sockaddr_in6 *)&ro->ro_dst;
 		bcopy(&nh->nexthop_dst6, &dst_sa, sizeof(struct sockaddr_in6));
 		m->m_flags |= M_SKIP_FIREWALL;
 		m->m_flags &= ~M_IP6_NEXTHOP;
 		m_tag_delete(m, fwd_tag);
+		if (nh_ifp != NULL) {
+			ifp = nh_ifp;
+			goto passout;
+		}
 		goto again;
 	}
 

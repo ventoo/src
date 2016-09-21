@@ -642,6 +642,7 @@ struct m_nexthop {
 		struct sockaddr_in	__nexthop_dst;
 		struct sockaddr_in6	__nexthop_dst6;
 	} __nexthop_u;
+	u_short nexthop_if_index;
 };
 
 #define nexthop_dst		__nexthop_u.__nexthop_dst

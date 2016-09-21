@@ -5298,19 +5298,18 @@ out:
 
 #ifdef INET
 static void
-pf_route(struct mbuf **m, struct pf_rule *r, int dir, struct ifnet *oifp,
+pf_route(struct mbuf **m, struct pf_rule *r, int dir, struct ifnet *ifp,
     struct pf_state *s, struct pf_pdesc *pd)
 {
-	struct mbuf		*m0, *m1;
-	struct sockaddr_in	dst;
+	struct m_tag		*fwd_tag = NULL;
+	struct mbuf		*m0;
+	struct m_nexthop	dst;
 	struct ip		*ip;
-	struct ifnet		*ifp = NULL;
 	struct pf_addr		 naddr;
 	struct pf_src_node	*sn = NULL;
 	int			 error = 0;
-	uint16_t		 ip_len, ip_off;
 
-	KASSERT(m && *m && r && oifp, ("%s: invalid parameters", __func__));
+	KASSERT(m && *m && r && ifp, ("%s: invalid parameters", __func__));
 	KASSERT(dir == PF_IN || dir == PF_OUT, ("%s: invalid direction",
 	    __func__));
 
@@ -5340,16 +5339,17 @@ pf_route(struct mbuf **m, struct pf_rule *r, int dir, struct ifnet *oifp,
 	ip = mtod(m0, struct ip *);
 
 	bzero(&dst, sizeof(dst));
-	dst.sin_family = AF_INET;
-	dst.sin_len = sizeof(dst);
-	dst.sin_addr = ip->ip_dst;
+	dst.nexthop_dst.sin_family = AF_INET;
+	dst.nexthop_dst.sin_len = sizeof(dst.nexthop_dst);
+	dst.nexthop_dst.sin_addr = ip->ip_dst;
 
 	if (r->rt == PF_FASTROUTE) {
 		struct rtentry *rt;
 
 		if (s)
 			PF_STATE_UNLOCK(s);
-		rt = rtalloc1_fib(sintosa(&dst), 0, 0, M_GETFIB(m0));
+		rt = rtalloc1_fib(sintosa(&dst.nexthop_dst), 0, 0,
+		    M_GETFIB(m0));
 		if (rt == NULL) {
 			KMOD_IPSTAT_INC(ips_noroute);
 			error = EHOSTUNREACH;
@@ -5360,7 +5360,8 @@ pf_route(struct mbuf **m, struct pf_rule *r, int dir, struct ifnet *oifp,
 		counter_u64_add(rt->rt_pksent, 1);
 
 		if (rt->rt_flags & RTF_GATEWAY)
-			bcopy(satosin(rt->rt_gateway), &dst, sizeof(dst));
+			bcopy(satosin(rt->rt_gateway), &dst.nexthop_dst,
+			    sizeof(dst.nexthop_dst));
 		RTFREE_LOCKED(rt);
 	} else {
 		if (TAILQ_EMPTY(&r->rpool.list)) {
@@ -5372,12 +5373,13 @@ pf_route(struct mbuf **m, struct pf_rule *r, int dir, struct ifnet *oifp,
 			pf_map_addr(AF_INET, r, (struct pf_addr *)&ip->ip_src,
 			    &naddr, NULL, &sn);
 			if (!PF_AZERO(&naddr, AF_INET))
-				dst.sin_addr.s_addr = naddr.v4.s_addr;
+				dst.nexthop_dst.sin_addr.s_addr =
+				    naddr.v4.s_addr;
 			ifp = r->rpool.cur->kif ?
 			    r->rpool.cur->kif->pfik_ifp : NULL;
 		} else {
 			if (!PF_AZERO(&s->rt_addr, AF_INET))
-				dst.sin_addr.s_addr =
+				dst.nexthop_dst.sin_addr.s_addr =
 				    s->rt_addr.v4.s_addr;
 			ifp = s->rt_kif ? s->rt_kif->pfik_ifp : NULL;
 			PF_STATE_UNLOCK(s);
@@ -5386,87 +5388,45 @@ pf_route(struct mbuf **m, struct pf_rule *r, int dir, struct ifnet *oifp,
 	if (ifp == NULL)
 		goto bad;
 
-	if (oifp != ifp) {
-		if (pf_test(PF_OUT, ifp, &m0, NULL) != PF_PASS)
-			goto bad;
-		else if (m0 == NULL)
-			goto done;
-		if (m0->m_len < sizeof(struct ip)) {
-			DPFPRINTF(PF_DEBUG_URGENT,
-			    ("%s: m0->m_len < sizeof(struct ip)\n", __func__));
-			goto bad;
-		}
-		ip = mtod(m0, struct ip *);
-	}
-
-	if (ifp->if_flags & IFF_LOOPBACK)
-		m0->m_flags |= M_SKIP_FIREWALL;
-
-	ip_len = ntohs(ip->ip_len);
-	ip_off = ntohs(ip->ip_off);
-
-	/* Copied from FreeBSD 10.0-CURRENT ip_output. */
-	m0->m_pkthdr.csum_flags |= CSUM_IP;
-	if (m0->m_pkthdr.csum_flags & CSUM_DELAY_DATA & ~ifp->if_hwassist) {
-		in_delayed_cksum(m0);
-		m0->m_pkthdr.csum_flags &= ~CSUM_DELAY_DATA;
-	}
-#ifdef SCTP
-	if (m0->m_pkthdr.csum_flags & CSUM_SCTP & ~ifp->if_hwassist) {
-		sctp_delayed_cksum(m, (uint32_t)(ip->ip_hl << 2));
-		m0->m_pkthdr.csum_flags &= ~CSUM_SCTP;
-	}
-#endif
+	/*
+	 * Let network stack know an explicit interface
+	 * shall be used to forward this packet later.
+	 */
+	dst.nexthop_if_index = ifp->if_index;
 
 	/*
-	 * If small enough for interface, or the interface will take
-	 * care of the fragmentation for us, we can just send directly.
+	 * Look for the tag and only add the forwarding
+	 * information for dup-to or when there is no
+	 * prior routing decision pending.
 	 */
-	if (ip_len <= ifp->if_mtu ||
-	    (m0->m_pkthdr.csum_flags & ifp->if_hwassist & CSUM_TSO) != 0 ||
-	    ((ip_off & IP_DF) == 0 && (ifp->if_hwassist & CSUM_FRAGMENT))) {
-		ip->ip_sum = 0;
-		if (m0->m_pkthdr.csum_flags & CSUM_IP & ~ifp->if_hwassist) {
-			ip->ip_sum = in_cksum(m0, ip->ip_hl << 2);
-			m0->m_pkthdr.csum_flags &= ~CSUM_IP;
-		}
-		m_clrprotoflags(m0);	/* Avoid confusing lower layers. */
-		error = (*ifp->if_output)(ifp, m0, sintosa(&dst), NULL);
-		goto done;
-	}
-
-	/* Balk when DF bit is set or the interface didn't support TSO. */
-	if ((ip_off & IP_DF) || (m0->m_pkthdr.csum_flags & CSUM_TSO)) {
-		error = EMSGSIZE;
-		KMOD_IPSTAT_INC(ips_cantfrag);
+	fwd_tag = m_tag_find(m0, PACKET_TAG_IPFORWARD, NULL);
+	if (fwd_tag != NULL) {
 		if (r->rt != PF_DUPTO) {
-			icmp_error(m0, ICMP_UNREACH, ICMP_UNREACH_NEEDFRAG, 0,
-			    ifp->if_mtu);
 			goto done;
-		} else
+		}
+		m_tag_unlink(m0, fwd_tag);
+	} else {
+		fwd_tag = m_tag_get(PACKET_TAG_IPFORWARD, sizeof(dst),
+		    M_NOWAIT);
+		if (fwd_tag == NULL) {
 			goto bad;
+		}
 	}
 
-	error = ip_fragment(ip, &m0, ifp->if_mtu, ifp->if_hwassist);
-	if (error)
-		goto bad;
+	bcopy(&dst, (fwd_tag+1), sizeof(dst));
+	if (in_localip(dst.nexthop_dst.sin_addr))
+		m0->m_flags |= M_FASTFWD_OURS;
+	else
+		m0->m_flags &= ~M_FASTFWD_OURS;
+	m0->m_flags |= M_IP_NEXTHOP;
 
-	for (; m0; m0 = m1) {
-		m1 = m0->m_nextpkt;
-		m0->m_nextpkt = NULL;
-		if (error == 0) {
-			m_clrprotoflags(m0);
-			error = (*ifp->if_output)(ifp, m0, sintosa(&dst), NULL);
-		} else
-			m_freem(m0);
-	}
-
-	if (error == 0)
-		KMOD_IPSTAT_INC(ips_fragmented);
+	m_tag_prepend(m0, fwd_tag);
 
 done:
-	if (r->rt != PF_DUPTO)
-		*m = NULL;
+	if (r->rt == PF_DUPTO && fwd_tag != NULL) {
+		/* Duplicated packet must be sent now. */
+		ip_forward(m0, 1);
+	}
 	return;
 
 bad_locked:
@@ -5480,17 +5440,17 @@ bad:
 
 #ifdef INET6
 static void
-pf_route6(struct mbuf **m, struct pf_rule *r, int dir, struct ifnet *oifp,
+pf_route6(struct mbuf **m, struct pf_rule *r, int dir, struct ifnet *ifp,
     struct pf_state *s, struct pf_pdesc *pd)
 {
+	struct m_tag		*fwd_tag = NULL;
 	struct mbuf		*m0;
-	struct sockaddr_in6	dst;
+	struct m_nexthop	dst;
 	struct ip6_hdr		*ip6;
-	struct ifnet		*ifp = NULL;
 	struct pf_addr		 naddr;
 	struct pf_src_node	*sn = NULL;
 
-	KASSERT(m && *m && r && oifp, ("%s: invalid parameters", __func__));
+	KASSERT(m && *m && r && ifp, ("%s: invalid parameters", __func__));
 	KASSERT(dir == PF_IN || dir == PF_OUT, ("%s: invalid direction",
 	    __func__));
 
@@ -5520,9 +5480,9 @@ pf_route6(struct mbuf **m, struct pf_rule *r, int dir, struct ifnet *oifp,
 	ip6 = mtod(m0, struct ip6_hdr *);
 
 	bzero(&dst, sizeof(dst));
-	dst.sin6_family = AF_INET6;
-	dst.sin6_len = sizeof(dst);
-	dst.sin6_addr = ip6->ip6_dst;
+	dst.nexthop_dst6.sin6_family = AF_INET6;
+	dst.nexthop_dst6.sin6_len = sizeof(dst.nexthop_dst6);
+	dst.nexthop_dst6.sin6_addr = ip6->ip6_dst;
 
 	/* Cheat. XXX why only in the v6 case??? */
 	if (r->rt == PF_FASTROUTE) {
@@ -5543,12 +5503,12 @@ pf_route6(struct mbuf **m, struct pf_rule *r, int dir, struct ifnet *oifp,
 		pf_map_addr(AF_INET6, r, (struct pf_addr *)&ip6->ip6_src,
 		    &naddr, NULL, &sn);
 		if (!PF_AZERO(&naddr, AF_INET6))
-			PF_ACPY((struct pf_addr *)&dst.sin6_addr,
+			PF_ACPY((struct pf_addr *)&dst.nexthop_dst6.sin6_addr,
 			    &naddr, AF_INET6);
 		ifp = r->rpool.cur->kif ? r->rpool.cur->kif->pfik_ifp : NULL;
 	} else {
 		if (!PF_AZERO(&s->rt_addr, AF_INET6))
-			PF_ACPY((struct pf_addr *)&dst.sin6_addr,
+			PF_ACPY((struct pf_addr *)&dst.nexthop_dst6.sin6_addr,
 			    &s->rt_addr, AF_INET6);
 		ifp = s->rt_kif ? s->rt_kif->pfik_ifp : NULL;
 	}
@@ -5559,49 +5519,45 @@ pf_route6(struct mbuf **m, struct pf_rule *r, int dir, struct ifnet *oifp,
 	if (ifp == NULL)
 		goto bad;
 
-	if (oifp != ifp) {
-		if (pf_test6(PF_FWD, ifp, &m0, NULL) != PF_PASS)
-			goto bad;
-		else if (m0 == NULL)
-			goto done;
-		if (m0->m_len < sizeof(struct ip6_hdr)) {
-			DPFPRINTF(PF_DEBUG_URGENT,
-			    ("%s: m0->m_len < sizeof(struct ip6_hdr)\n",
-			    __func__));
-			goto bad;
-		}
-		ip6 = mtod(m0, struct ip6_hdr *);
-	}
-
-	if (ifp->if_flags & IFF_LOOPBACK)
-		m0->m_flags |= M_SKIP_FIREWALL;
-
-	if (m0->m_pkthdr.csum_flags & CSUM_DELAY_DATA_IPV6 &
-	    ~ifp->if_hwassist) {
-		uint32_t plen = m0->m_pkthdr.len - sizeof(*ip6);
-		in6_delayed_cksum(m0, plen, sizeof(struct ip6_hdr));
-		m0->m_pkthdr.csum_flags &= ~CSUM_DELAY_DATA_IPV6;
-	}
+	/*
+	 * Let network stack know an explicit interface
+	 * shall be used to forward this packet later.
+	 */
+	dst.nexthop_if_index = ifp->if_index;
 
 	/*
-	 * If the packet is too large for the outgoing interface,
-	 * send back an icmp6 error.
+	 * Look for the tag and only add the forwarding
+	 * information for dup-to or when there is no
+	 * prior routing decision pending.
 	 */
-	if (IN6_IS_SCOPE_EMBED(&dst.sin6_addr))
-		dst.sin6_addr.s6_addr16[1] = htons(ifp->if_index);
-	if ((u_long)m0->m_pkthdr.len <= ifp->if_mtu)
-		nd6_output(ifp, ifp, m0, &dst, NULL);
-	else {
-		in6_ifstat_inc(ifp, ifs6_in_toobig);
-		if (r->rt != PF_DUPTO)
-			icmp6_error(m0, ICMP6_PACKET_TOO_BIG, 0, ifp->if_mtu);
-		else
+	fwd_tag = m_tag_find(m0, PACKET_TAG_IPFORWARD, NULL);
+	if (fwd_tag != NULL) {
+		if (r->rt != PF_DUPTO) {
+			goto done;
+		}
+		m_tag_unlink(m0, fwd_tag);
+	} else {
+		fwd_tag = m_tag_get(PACKET_TAG_IPFORWARD, sizeof(dst),
+		    M_NOWAIT);
+		if (fwd_tag == NULL) {
 			goto bad;
+		}
 	}
 
+	bcopy(&dst, (fwd_tag+1), sizeof(dst));
+	if (in6_localip(&dst.nexthop_dst6.sin6_addr))
+		m0->m_flags |= M_FASTFWD_OURS;
+	else
+		m0->m_flags &= ~M_FASTFWD_OURS;
+	m0->m_flags |= M_IP6_NEXTHOP;
+
+	m_tag_prepend(m0, fwd_tag);
+
 done:
-	if (r->rt != PF_DUPTO)
-		*m = NULL;
+	if (r->rt == PF_DUPTO && fwd_tag != NULL) {
+		/* Duplicated packet must be sent now. */
+		ip6_forward(m0, 1);
+	}
 	return;
 
 bad_locked:
