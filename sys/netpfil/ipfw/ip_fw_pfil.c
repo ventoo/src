@@ -178,12 +178,11 @@ again:
 			len = sizeof(struct sockaddr_in);
 #endif
 
-		/* Incoming packets should not be tagged so we do not
-		 * m_tag_find. Outgoing packets may be tagged, so we
-		 * reuse the tag if present.
+		/*
+		 * Reuse the tag if present.  We can overwrite
+		 * a previous pfil hook decision this way.
 		 */
-		fwd_tag = (dir == DIR_IN) ? NULL :
-			m_tag_find(*m0, PACKET_TAG_IPFORWARD, NULL);
+		fwd_tag = m_tag_find(*m0, PACKET_TAG_IPFORWARD, NULL);
 		if (fwd_tag != NULL) {
 			m_tag_unlink(*m0, fwd_tag);
 		} else {
@@ -199,6 +198,8 @@ again:
 			bcopy(args.next_hop6, (fwd_tag+1), len);
 			if (in6_localip(&args.next_hop6->sin6_addr))
 				(*m0)->m_flags |= M_FASTFWD_OURS;
+			else
+				(*m0)->m_flags &= ~M_FASTFWD_OURS;
 			(*m0)->m_flags |= M_IP6_NEXTHOP;
 		}
 #endif
@@ -207,6 +208,8 @@ again:
 			bcopy(args.next_hop, (fwd_tag+1), len);
 			if (in_localip(args.next_hop->sin_addr))
 				(*m0)->m_flags |= M_FASTFWD_OURS;
+			else
+				(*m0)->m_flags &= ~M_FASTFWD_OURS;
 			(*m0)->m_flags |= M_IP_NEXTHOP;
 		}
 #endif
