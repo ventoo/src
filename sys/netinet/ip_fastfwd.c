@@ -469,8 +469,8 @@ forwardlocal:
 		 * Redo route lookup with new destination address
 		 */
 		if (fwd_tag) {
-			dest.s_addr = ((struct sockaddr_in *)
-				    (fwd_tag + 1))->sin_addr.s_addr;
+			struct m_nexthop *nh = (struct m_nexthop *)(fwd_tag+1);
+			dest.s_addr = nh->nexthop_dst.sin_addr.s_addr;
 			m_tag_delete(m, fwd_tag);
 			m->m_flags &= ~M_IP_NEXTHOP;
 		}

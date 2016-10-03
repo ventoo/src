@@ -164,19 +164,11 @@ again:
 #else
 	    {
 		struct m_tag *fwd_tag;
-		size_t len;
+		struct m_nexthop *nh;
 
 		KASSERT(args.next_hop == NULL || args.next_hop6 == NULL,
 		    ("%s: both next_hop=%p and next_hop6=%p not NULL", __func__,
 		     args.next_hop, args.next_hop6));
-#ifdef INET6
-		if (args.next_hop6 != NULL)
-			len = sizeof(struct sockaddr_in6);
-#endif
-#ifdef INET
-		if (args.next_hop != NULL)
-			len = sizeof(struct sockaddr_in);
-#endif
 
 		/*
 		 * Reuse the tag if present.  We can overwrite
@@ -186,16 +178,19 @@ again:
 		if (fwd_tag != NULL) {
 			m_tag_unlink(*m0, fwd_tag);
 		} else {
-			fwd_tag = m_tag_get(PACKET_TAG_IPFORWARD, len,
+			fwd_tag = m_tag_get(PACKET_TAG_IPFORWARD, sizeof(*nh),
 			    M_NOWAIT);
 			if (fwd_tag == NULL) {
 				ret = EACCES;
 				break; /* i.e. drop */
 			}
 		}
+		nh = (struct m_nexthop *)(fwd_tag+1);
+		bzero(nh, sizeof(*nh));
 #ifdef INET6
 		if (args.next_hop6 != NULL) {
-			bcopy(args.next_hop6, (fwd_tag+1), len);
+			bcopy(args.next_hop6, &nh->nexthop_dst6,
+			    sizeof(nh->nexthop_dst6));
 			if (in6_localip(&args.next_hop6->sin6_addr))
 				(*m0)->m_flags |= M_FASTFWD_OURS;
 			else
@@ -205,7 +200,8 @@ again:
 #endif
 #ifdef INET
 		if (args.next_hop != NULL) {
-			bcopy(args.next_hop, (fwd_tag+1), len);
+			bcopy(args.next_hop, &nh->nexthop_dst,
+			    sizeof(nh->nexthop_dst));
 			if (in_localip(args.next_hop->sin_addr))
 				(*m0)->m_flags |= M_FASTFWD_OURS;
 			else

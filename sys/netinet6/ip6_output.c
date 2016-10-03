@@ -816,8 +816,9 @@ again:
 	/* Or forward to some other address? */
 	if ((m->m_flags & M_IP6_NEXTHOP) &&
 	    (fwd_tag = m_tag_find(m, PACKET_TAG_IPFORWARD, NULL)) != NULL) {
+		struct m_nexthop *nh = (struct m_nexthop *)(fwd_tag+1);
 		dst = (struct sockaddr_in6 *)&ro->ro_dst;
-		bcopy((fwd_tag+1), &dst_sa, sizeof(struct sockaddr_in6));
+		bcopy(&nh->nexthop_dst6, &dst_sa, sizeof(struct sockaddr_in6));
 		m->m_flags |= M_SKIP_FIREWALL;
 		m->m_flags &= ~M_IP6_NEXTHOP;
 		m_tag_delete(m, fwd_tag);

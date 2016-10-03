@@ -637,6 +637,16 @@ struct ip6_mtuinfo {
 #define	M_SKIP_PFIL		M_PROTO12	/* skip pfil processing */
 
 #ifdef _KERNEL
+struct m_nexthop {
+	union {
+		struct sockaddr_in	__nexthop_dst;
+		struct sockaddr_in6	__nexthop_dst6;
+	} __nexthop_u;
+};
+
+#define nexthop_dst		__nexthop_u.__nexthop_dst
+#define nexthop_dst6		__nexthop_u.__nexthop_dst6
+
 struct cmsghdr;
 struct ip6_hdr;
 

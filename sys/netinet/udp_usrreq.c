@@ -617,8 +617,10 @@ udp_input(struct mbuf *m, int off)
 	if ((m->m_flags & M_IP_NEXTHOP) &&
 	    (fwd_tag = m_tag_find(m, PACKET_TAG_IPFORWARD, NULL)) != NULL) {
 		struct sockaddr_in *next_hop;
+		struct m_nexthop *nh;
 
-		next_hop = (struct sockaddr_in *)(fwd_tag + 1);
+		nh = (struct m_nexthop *)(fwd_tag + 1);
+		next_hop = &nh->nexthop_dst;
 
 		/*
 		 * Transparently forwarded. Pretend to be the destination.

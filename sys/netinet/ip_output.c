@@ -566,7 +566,8 @@ sendit:
 	/* Or forward to some other address? */
 	if ((m->m_flags & M_IP_NEXTHOP) &&
 	    (fwd_tag = m_tag_find(m, PACKET_TAG_IPFORWARD, NULL)) != NULL) {
-		bcopy((fwd_tag+1), dst, sizeof(struct sockaddr_in));
+		struct m_nexthop *nh = (struct m_nexthop *)(fwd_tag+1);
+		bcopy(&nh->nexthop_dst, dst, sizeof(struct sockaddr_in));
 		m->m_flags |= M_SKIP_FIREWALL;
 		m->m_flags &= ~M_IP_NEXTHOP;
 		m_tag_delete(m, fwd_tag);
